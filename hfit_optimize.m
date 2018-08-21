@@ -60,12 +60,13 @@ function results = hfit_optimize(likfun,hparam,param,data)
         % TODO only do every so often
         [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples);
 
-        % compute P(x|data,h_old) for samples
+        % compute ln P(x|data,h_old) for samples (unnormalized)
         logp = logpost(X, data, h_old, hparam, param, likfun);
-        logp = logp - logsumexp(logp); % normalize by P(data,h_old) (approximately)
 
         % compute importance weights
-        w = exp(logp - logq);
+        % w(i) = p(i)/q(i) / sum(p(j)/q(j))   (Bishop 2006, p. 533)
+        logw = logp - logq - logsumexp(logp - logq);
+        w = exp(logw);
 
         disp(X);
         disp(w);
@@ -81,6 +82,10 @@ function results = hfit_optimize(likfun,hparam,param,data)
         Q = -nQ;
             
         h_old = h_new;
+
+        disp('NEW h!');
+        disp(h_new);
+        disp(loghypost(h_new, data, hparam, param, likfun));
     end
 
     param = set_logpdf(hparam, param, h_new);
@@ -92,7 +97,7 @@ end
 %
 % OUTPUTS:
 %   X = [nsamples x K] samples; each row is a set of parameters x
-%   logq = [nsamples x 1] = ln q(x) = ln P(x|data,h) for each x; used to compute importance weights
+%   logq = [nsamples x 1] = ln q(x) = ln P(x|data,h) for each x (unnormalized); used to compute importance weights
 
 %
 function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
@@ -118,14 +123,13 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
         disp(['     sample ', num2str(n)]);
 
         % Adaptive Metropolis-within-Gibbs for each component
-        % See Roberts and Rosenthal (2008): Examples of Adaptive MCMC
+        % (Roberts and Rosenthal, 2008)
         for k = 1:K
             % P(x_k|x_\k,data,h) is proportional to P(data|x) P(x_k|h)
             logpost_k = @(x_k) loglik([x_new(1:k-1) x_k x_old(k+1:end)], data, likfun) + param(k).logpdf(x_k);
 
             % proposals update by adding an increment ~ N(0,exp(ls(k))
-            proprnd = @(x_old) normrnd(x_old, exp(ls(k)));
-            proppdf = @(x_new,x_old) normpdf(x_new, x_old, exp(ls(k)));
+            proprnd = @(x_old_k) mh_proprnd(x_old_k, param, k, ls);
 
             % draw batch_size samples of k-th component and take the last one only
             [x, accept] = mhsample(x_old(k), batch_size, 'logpdf', logpost_k, 'proprnd', proprnd, 'symmetric', true);
@@ -149,26 +153,19 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
 
     % compute q(x) = P(x|data,h) up to a proportionality constant
     logq = logpost(X, data, h_old, hparam, param, likfun);
-
-    % Compute proportionality constant P(data,h) and normalize q(x)'s by it.
-    % This is important since the normalization constant is different for different
-    % values of h, and thus ignoring it would screw up the importance weights.
-    % We approximate the integral with a sum
-    C = logsumexp(logq);
-    logq = logq - C;
 end
 
 
 
-% ln P(h)
+% Metropolis proposal function for x(k)_new given x(k)_old
 %
-function logp = loghyperprior(h, hparam)
-    logp = 0;
-    i = 1;
-    for k = 1:length(hparam)
-        l = length(hparam(k).lb);
-        logp = logp + hparam(k).logpdf(h(i:i+l-1));
-        i = i + l;
+function x_new_k = mh_proprnd(x_old_k, param, k, ls)
+    while true
+        x_new_k = normrnd(x_old_k, exp(ls(k)));
+        if param(k).lb <= x_new_k && x_new_k <= param(k).ub
+            % keep parameters within bounds
+            break;
+        end
     end
 end
 
@@ -184,7 +181,8 @@ function logp = logprior(x, h, hparam, param)
         logp = logp + param(k).hlogpdf(x(k),h(i:i+l-1));
         i = i + l;
     end
-    %disp(['  logprior ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
+    h
+    disp(['  logprior ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
@@ -198,11 +196,11 @@ function logp = loglik(x, data, likfun)
     for s = 1:length(data)
         logp = logp + likfun(x,data(s));
     end
-    %disp(['  loglik ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
+    disp(['  loglik ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
-% Calculate ln P(x|data,h) for all samples (rows) x in X
+% ln P(x|data,h) for all samples (rows) x in X
 % up to a proportionality constant.
 %
 % P(x|data,h) = P(data|x) P(x|h) / P(data|h)
@@ -216,6 +214,44 @@ function logp = logpost(X, data, h, hparam, param, likfun)
 end
 
 
+% ln P(h)
+%
+function logp = loghyprior(h, hparam)
+    logp = 0;
+    i = 1;
+    for k = 1:length(hparam)
+        l = length(hparam(k).lb);
+        logp = logp + hparam(k).logpdf(h(i:i+l-1));
+        i = i + l;
+    end
+end
+ 
+
+% ln P(D|h) approximation
+%
+% P(D|h) = integral P(D|x) P(x|h) dx
+%       ~= 1/L sum P(D|x^l) P(x^l|h)
+% where the L samples x^1..x^l are drawn from P(x|h)
+%
+function logp = loghylik(h, data, hparam, param, likfun)
+    nsamples = 10;
+    logp = [];
+    disp('----------------sheeeeeeeeeeeeeeeeit');
+    for n = 1:nsamples
+        x = param_rnd(hparam, param, h);
+        x
+        logp = [logp; loglik(x, data, likfun) + logprior(x, h, hparam, param)];
+    end
+    logp = logsumexp(logp) - log(nsamples);
+end
+
+
+% ln P(h|D) up to a proportionality constant
+%
+function logp = loghypost(h, data, hparam, param, likfun)
+    logp = loghylik(h, data, hparam, param, likfun) + loghyprior(h, hparam);
+end
+
 
 % random draw from P(x|h)
 %
@@ -224,13 +260,6 @@ function x = param_rnd(hparam, param, h)
     for k = 1:length(param)
         l = length(hparam(k).lb);
         x(k) = param(k).hrnd(h(i:i+l-1));
-        % rejection sampling -- not needed TODO rm
-        %while true
-        %    x(k) = param(k).hrnd(h(i:i+l-1));
-        %    if param(k).lb <= x(k) && x(k) >= param(k).ub
-        %        break;
-        %    end
-        %end
         i = i + l;
     end
 end
@@ -251,11 +280,11 @@ end
 
 % Q(h|h_old) = ln P(h) + integral P(x|data,h_old) ln P(data,x|h) dx
 %            = ln P(h) + integral P(x|data,h_old) [ln P(data|x) + ln P(x|h)] dx
-%           ~= ln P(h) + 1/L sum w(l) [ln P(data|x^l) + ln P(x^l|h)]
+%           ~= ln P(h) + sum w(l) [ln P(data|x^l) + ln P(x^l|h)]
 % (Bishop 2006, p. 441 and p. 536)
 % Last line is an importance sampling approximation of the integral
 % using L samples x^1..x^L, with the importance weight of sample l given by
-% w(l) = P(x^l|data,h_old) / q(x^l)
+% w(l) = P(x^l|data,h_old) / q(x^l) / sum(...)      (Bishop 2006, p. 533)
 %
 % TODO optimization: can ignore P(data|x) when maximizing Q w.r.t. h
 %
@@ -269,14 +298,13 @@ function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
         x = X(n,:);
         Q = Q + w(n) * (loglik(x, data, likfun) + logprior(x, h_new, hparam, param));
     end 
-    Q = Q / nsamples;
 
     % ln P(h)
-    Q = Q + loghyperprior(h_new, hparam); 
+    Q = Q + loghyprior(h_new, hparam); 
 
     disp('computeQ');
     disp(h_new);
-    disp(loghyperprior(h_new, hparam));
+    disp(loghyprior(h_new, hparam));
     disp(Q);
 
 end
