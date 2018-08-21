@@ -58,26 +58,32 @@ function results = hfit_optimize(likfun,hparam,param,data)
   
         % Draw samples from P(x|data,h_old)
         % TODO only do every so often
-        [X, logq] = samples(h_old, likfun, hparam, param, data, nsamples);
+        [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples);
 
         % compute P(x|data,h_old) for samples
-        logp = logpost(X, data, h, hparam, param, likfun);
-        logp = logp - logsumexp(logp); % normalize by P(data,h_old) (approximately)
+        logp = logpost(X, data, h_old, hparam, param, likfun);
+        logp = logp - (logsumexp(logp) - log(numel(logp))); % normalize by P(data,h_old) (approximately)
 
         % compute importance weights
         w = exp(logp - logq);
 
-        Q = @(h_new) -computeQ(h_new, h_old, X, w, data, hparam, param, likfun);
+        disp(X);
+        disp(w);
 
-        h0 = h_old;
-        % h0 = [];  % TODO test
-        % for k = 1:K
-        %     h0 = [h_old hparam(k).rnd()];
-        % end
+        f = @(h_new) -computeQ(h_new, h_old, X, w, data, hparam, param, likfun);
+
+        h0 = [];
+        for k = 1:K
+            h0 = [h0 hparam(k).rnd()];
+        end
     
-        [h_new,nlogp] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
-        logp = -nlogp;
+        [h_new,nQ] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
+        Q = -nQ;
             
+        disp('--------------------------');
+        disp(h_new);
+        disp(Q);
+
         h_old = h_new;
     end
 
@@ -98,19 +104,22 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
     X = nan(nsamples, K);
     logq = nan(nsamples, 1);
     batch_size = 50; % subsample once every batch_size samples
+    burn_in = 10; % burn in first few samples
 
     % initialize x0
     x_old = param_rnd(hparam, param, h_old);
 
     % set .logpdf = P(x|h) for convenience
-    param = set_logpdf(hparam, param, h);
+    param = set_logpdf(hparam, param, h_old);
 
     % log of std of proposal distribution for each component
     ls = zeros(1,K);
 
     % Draw nsamples samples
-    for n = 1:nsamples % TODO burn-in
+    for n = 1:nsamples+burn_in 
         x_new = nan(1,K);
+
+        disp(['     sample ', num2str(n)]);
 
         % Adaptive Metropolis-within-Gibbs for each component
         % See Roberts and Rosenthal (2008): Examples of Adaptive MCMC
@@ -119,11 +128,11 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
             logpost_k = @(x_k) loglik([x_new(1:k-1) x_k x_old(k+1:end)], data, likfun) + param(k).logpdf(x_k);
 
             % proposals update by adding an increment ~ N(0,exp(ls(k))
-            proprnd = @(x_old) normrnd(x_old, exp(ls(k));
-            proppdf = @(x_new,x_old) normpdf(x_new, x_old, exp(ls(k));
+            proprnd = @(x_old) normrnd(x_old, exp(ls(k)));
+            proppdf = @(x_new,x_old) normpdf(x_new, x_old, exp(ls(k)));
 
             % draw batch_size samples of k-th component and take the last one only
-            [x, accept] = mhsample(x_old(k), batch_size, 'logpdf', logpost_k, 'proprnd', proprnd, 'symmetric', true) 
+            [x, accept] = mhsample(x_old(k), batch_size, 'logpdf', logpost_k, 'proprnd', proprnd, 'symmetric', true);
             x_new(k) = x(batch_size); % ignore first batch_size-1 samples
 
             % update proposal distribution to maintain the acceptance rate
@@ -140,13 +149,16 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
         x_old = x_new;
     end
 
-    % compute q(x) = P(x|data,h) up to a proportionality constant
-    logq = mfit_post(X, param, data, likfun);
+    X = X(burn_in+1:end,:);
 
-    % Compute proportionality constant p(data,h) and normalize q(x)'s by it.
+    % compute q(x) = P(x|data,h) up to a proportionality constant
+    logq = logpost(X, data, h_old, hparam, param, likfun);
+
+    % Compute proportionality constant P(data,h) and normalize q(x)'s by it.
     % This is important since the normalization constant is different for different
     % values of h, and thus ignoring it would screw up the importance weights.
-    C = logsumexp(logq);
+    % We approximate the integral with a sum
+    C = logsumexp(logq) - log(numel(logq));
     logq = logq - C;
 end
 
@@ -173,9 +185,10 @@ function logp = logprior(x, h, hparam, param)
     i = 1;
     for k = 1:length(param)
         l = length(hparam(k).lb);
-        logp = logp + param(k).hlogpdf(x,h(i:i+l-1));
+        logp = logp + param(k).hlogpdf(x(k),h(i:i+l-1));
         i = i + l;
     end
+    %disp(['  logprior ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
@@ -189,11 +202,14 @@ function logp = loglik(x, data, likfun)
     for s = 1:length(data)
         logp = logp + likfun(x,data(s));
     end
+    %disp(['  loglik ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
 % Calculate ln P(x|data,h) for all samples (rows) x in X
 % up to a proportionality constant.
+%
+% P(x|data,h) = P(data|x) P(x|h) / P(data|h)
 %
 function logp = logpost(X, data, h, hparam, param, likfun)
     nsamples = size(X,1);
@@ -211,12 +227,14 @@ function x = param_rnd(hparam, param, h)
     i = 1;
     for k = 1:length(param)
         l = length(hparam(k).lb);
-        while true
-            x(k) = param(k).hrnd(h(i:i+l-1));
-            if param(k).lb <= x(k) and x(k) >= param(k).ub
-                break;
-            end
-        end
+        x(k) = param(k).hrnd(h(i:i+l-1));
+        % rejection sampling -- not needed TODO rm
+        %while true
+        %    x(k) = param(k).hrnd(h(i:i+l-1));
+        %    if param(k).lb <= x(k) && x(k) >= param(k).ub
+        %        break;
+        %    end
+        %end
         i = i + l;
     end
 end
@@ -235,20 +253,20 @@ function param = set_logpdf(hparam, param, h)
 end
 
 
-% Q(h|h_old) = ln P(h) + integral p(x|data,h_old) ln p(data,x|h) dx
-%            = ln P(h) + integral p(x|data,h_old) [ln p(data|x) + ln p(x|h)] dx
-%           ~= ln P(h) + 1/L sum w(l) [ln p(data|x^l) + ln p(x^l|h)]
+% Q(h|h_old) = ln P(h) + integral P(x|data,h_old) ln P(data,x|h) dx
+%            = ln P(h) + integral P(x|data,h_old) [ln P(data|x) + ln P(x|h)] dx
+%           ~= ln P(h) + 1/L sum w(l) [ln P(data|x^l) + ln P(x^l|h)]
 % (Bishop 2006, p. 441 and p. 536)
 % Last line is an importance sampling approximation of the integral
 % using L samples x^1..x^L, with the importance weight of sample l given by
-% w(l) = p(x^l|data,h_old) / q(x^l)
+% w(l) = P(x^l|data,h_old) / q(x^l)
 %
-% TODO optimization: can ignore p(data|x) when maximizing Q w.r.t. h
+% TODO optimization: can ignore P(data|x) when maximizing Q w.r.t. h
 %
 function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
     nsamples = size(X,1);
 
-    % integral p(x|data,h_old) ln p(data,x|h)
+    % integral P(x|data,h_old) ln P(data,x|h) dx
     % approximated using importance sampling
     Q = 0;
     for n = 1:nsamples
@@ -258,5 +276,5 @@ function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
     Q = Q / nsamples;
 
     % ln P(h)
-    Q = Q + loghyperprior(h, hparam);
+    Q = Q + loghyperprior(h_new, hparam);
 end
