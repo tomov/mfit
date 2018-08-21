@@ -24,30 +24,40 @@ end
 
 % ------------ fit models --------------------%
 
+% create parameter structure
 hparam(1).name = 'gamma distribution shape and scale parameters';
 hparam(1).lb = [0 0];
-hparam(1).ub = [11 11]; % TODO function multivar unifpdf ; also Jeffery's priors
-hparam(1).logpdf = @(x) log(unifpdf(x(1), 0, 11)) + log(unifpdf(x(2), 0, 11)); 
-hparam(1).rnd = @() [rand * 11 rand * 11];
+hparam(1).ub = [110 11];
+%hparam(1).logpdf = @(x) log(unifpdf(x(1), 0, 11)) + log(unifpdf(x(2), 0, 11)); 
+J = @(a,b) [psi(1,a) 1/b; 1/b a/b^2]; % Fisher information for Gamma (Yang and Berger, 1999)
+hparam(1).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jeffreys prior for Gamma
+hparam(1).rnd = @() [rand * 110 rand * 11];
 
-% create parameter structure
-%g = [1 5];  % parameters of the gamma prior
 param(1).name = 'inverse temperature';
-%param(1).logpdf = @(x) sum(log(gampdf(x,g(1),g(2))));  % log density function for prior
 param(1).hlogpdf = @(x,h) sum(log(gampdf(x,h(1),h(2))));
 param(1).hrnd = @(h) gamrnd(h(1),h(2));
 param(1).lb = 0;    % lower bound
 param(1).ub = 50;   % upper bound
 
+
+[a,b] = meshgrid(0:10:1000);
+z = a;
+for i = 1:size(a,1)
+    for j = 1:size(a,2)
+        z(i,j) = hparam(1).logpdf([a(i,j),b(i,j)]);
+    end
+end
+
+
 hparam(2).name = 'beta distribution parameters alpha and beta';
 hparam(2).lb = [0 0];
-hparam(2).ub = [10 10];
-hparam(2).logpdf = @(x) log(unifpdf(x(1), 0, 10)) + log(unifpdf(x(2), 0, 10)); 
-hparam(2).rnd = @() [rand * 10 rand * 10];
+hparam(2).ub = [10 100];
+%hparam(2).logpdf = @(x) log(unifpdf(x(1), 0, 10)) + log(unifpdf(x(2), 0, 10)); 
+J = @(a,b) [psi(1,a)-psi(1,a+b) -psi(1,a+b); -psi(1,a+b) psi(1,b)-psi(1,a+b)]; % Fisher information for Beta
+hparam(2).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jefferys prior for Beta
+hparam(2).rnd = @() [rand * 10 rand * 100];
 
-%a = 1.2; b = 1.2;   % parameters of beta prior
 param(2).name = 'learning rate';
-%param(2).logpdf = @(x) sum(log(betapdf(x,a,b)));
 param(2).hlogpdf = @(x,h) sum(log(betapdf(x,h(1),h(2))));
 param(2).hrnd = @(h) betarnd(h(1),h(2));
 param(2).lb = 0;
@@ -99,3 +109,4 @@ param_new = hfit_optimize(@rllik,hparam(1:2),param(1:2),data);
 %ylabel('Relative log predictive prob.','FontSize',25);
 %hold on; plot([0.5 1.5],[0 0],'--r','LineWidth',3); % red line shows chance performance
 %title('Cross-validation','FontSize',25);
+

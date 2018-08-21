@@ -62,7 +62,7 @@ function results = hfit_optimize(likfun,hparam,param,data)
 
         % compute P(x|data,h_old) for samples
         logp = logpost(X, data, h_old, hparam, param, likfun);
-        logp = logp - (logsumexp(logp) - log(numel(logp))); % normalize by P(data,h_old) (approximately)
+        logp = logp - logsumexp(logp); % normalize by P(data,h_old) (approximately)
 
         % compute importance weights
         w = exp(logp - logq);
@@ -80,10 +80,6 @@ function results = hfit_optimize(likfun,hparam,param,data)
         [h_new,nQ] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
         Q = -nQ;
             
-        disp('--------------------------');
-        disp(h_new);
-        disp(Q);
-
         h_old = h_new;
     end
 
@@ -158,7 +154,7 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
     % This is important since the normalization constant is different for different
     % values of h, and thus ignoring it would screw up the importance weights.
     % We approximate the integral with a sum
-    C = logsumexp(logq) - log(numel(logq));
+    C = logsumexp(logq);
     logq = logq - C;
 end
 
@@ -276,5 +272,11 @@ function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
     Q = Q / nsamples;
 
     % ln P(h)
-    Q = Q + loghyperprior(h_new, hparam);
+    Q = Q + loghyperprior(h_new, hparam); 
+
+    disp('computeQ');
+    disp(h_new);
+    disp(loghyperprior(h_new, hparam));
+    disp(Q);
+
 end
