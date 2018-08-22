@@ -39,13 +39,15 @@ function results = hfit_optimize(likfun,hyparam,param,data)
     % pick a crude estimate of h_old 
     % compute a bunch of random h's and pick one with max P(h|D)
     logmargpost_old = -Inf;
-    for i = 1:10000
+    for i = 1:100
         disp(i);
         h = hyparam_rnd(hyparam, param);
         logp = loghypost(h, data, hyparam, param, likfun);
         if logp > logmargpost_old
-            h_old = logp;
+            h_old = h;
             logmargpost_old = logp;
+            disp(h_old);
+            disp(logmargpost_old);
         end
     end
 
@@ -73,7 +75,7 @@ function results = hfit_optimize(likfun,hyparam,param,data)
   
         % Draw samples from P(x|data,h_old)
         % TODO only do every so often
-        [X, logq] = sample_post(h_old, likfun, hyparam, param, data, nsamples);
+        [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples);
 
         % compute ln P(x|data,h_old) for samples (unnormalized)
         logp = logpost(X, data, h_old, hyparam, param, likfun);
@@ -115,28 +117,15 @@ function results = hfit_optimize(likfun,hyparam,param,data)
 end
 
 
-% Draw from P(x|h)
-% does NOT respect parameter bounds
-%
-function [X] = sample_prior(h, hyparam, param, nsamples)
-    X = nan(nsamples, length(param));
-    for n = 1:nsamples
-        x = param_rnd(hyparam, param, h, false);
-        X(n,:) = x;
-    end
-end
 
-
-
-% Draw from P(x|data,h) using Gibbs sampling (Bishop 2006, p. 543).
-% Respects parameter bounds.
+% Draw random samples of paramters from P(x|data,h) using Gibbs sampling (Bishop 2006, p. 543).
 %
 % OUTPUTS:
 %   X = [nsamples x K] samples; each row is a set of parameters x
 %   logq = [nsamples x 1] = ln q(x) = ln P(x|data,h) for each x (unnormalized); used to compute importance weights
 
 %
-function [X, logq] = sample_post(h_old, likfun, hyparam, param, data, nsamples)
+function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples)
     K = length(param);
     X = nan(nsamples, K);
     logq = nan(nsamples, 1);
@@ -256,18 +245,16 @@ end
 % where the L samples x^1..x^l are drawn from P(x|h)
 %
 function logp = loghylik(h, data, hyparam, param, likfun)
-    nsamples = 10000;
-    tic
-    %draw = memoize(@sample_prior); % reuse the sample sample
-    X = sample_prior(h, hyparam, param, nsamples);
-    toc
-
+    nsamples = 100;
     logp = [];
     for n = 1:nsamples
-        x = X(n,:);
-        logp = [logp; loglik(x, data, likfun) + logprior(x, h, hyparam, param)];
+        x = param_rnd(hyparam, param, h, false);
+        logpost = loglik(x, data, likfun) + logprior(x, h, hyparam, param);
+        if ~isnan(logpost) && ~isinf(logpost)
+            logp = [logp; logpost];
+        end
     end
-    logp
+    assert(~isempty(logp), ['Looks like no good parameters x were found for the given h= ', mat2str(h)]);
     logp = logsumexp(logp) - log(nsamples);
 end
 
