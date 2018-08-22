@@ -1,12 +1,12 @@
-function results = hfit_optimize(likfun,hyparam,param,data,verbose)
+function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
 
     % Estimate hyperparameters (parameters for a group-level prior) by inverting
     % the generative model:
     %   group-level hyperparameters h ~ P(h), defined by hyparam.logpdf
     %   individual parameters       x ~ P(x|h), defined by param.hlogpdf
-    %   data                     data ~ P(data|x), defined by likfun 
+    %   data                        D ~ P(D|x), defined by likfun 
     %
-    % Uses expectation maximization (EM) to find MAP P(h|data), with x serving as latent
+    % Uses expectation maximization (EM) to find MAP P(h|D), with x serving as latent
     % variables (Bishop 2006). We approximate the integral over x using importance
     % sampling, with x's resampled every few iterations using Gibbs sampling, 
     % using Metropolis-Hastings to sample each component.
@@ -36,6 +36,7 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
     maxiter = 20; % stop after that many iterations
     nsamples_x = 10; % how many samples of x to use to approximate EM integral
     init_samples_h = 100; % how many samples of h to use to initialize h_old
+    lme_samples = 1000; % how many samples to use to approximate P(D|h) (for termination condition)
     batch_size = 50; % subsample once every batch_size samples (gibbs sampler param)
     burn_in = 10; % burn in first few samples when gibbs sampling
 
@@ -50,7 +51,7 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
     for i = 1:init_samples_h
         if verbose, disp(['  init iter ', num2str(i)]); end
         h = hyparam_rnd(hyparam, param);
-        logp = loghypost(h, data, hyparam, param, likfun, nsamples_x);
+        logp = loghypost(h, data, hyparam, param, likfun, lme_samples);
         if logp > logmargpost_old
             h_old = h;
             logmargpost_old = logp;
@@ -63,7 +64,10 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
 
     disp(['h_old initialized as ', mat2str(h_old)]);
     disp(['ln P(h|D) ~= ', num2str(logmargpost_old)]);
-    
+   
+    % Draw samples from q(x) = P(x|D,h_old)
+    [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
+
     % extract lower and upper bounds
     lb = [hyparam.lb];
     ub = [hyparam.ub];
@@ -80,18 +84,18 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
 
         %
         % E step: use importance sampling to approximate 
-        % the integral over P(x|data,h_old)
+        % the integral over P(x|D,h_old)
         %
 
-        %if ~exist('X', 'var') || eff < length(w) * 0.25
-        %    [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
-        %end
-
-        % Draw samples from P(x|data,h_old)
-        % TODO only do every so often
-        [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
-
+        % importance weights and effective sample size
         [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq);
+        disp(['effective sample size = ', num2str(eff), ' (vs. ', num2str(length(w)), ')']);
+
+        % draw new samples from q(x) = P(x|D,h_old) if effective sample size is too small
+        if eff < length(w) * 0.25
+            [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
+            [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq);
+        end
 
         %
         % M step: maximize Q(h,h_old)
@@ -100,11 +104,10 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
         f = @(h_new) -computeQ(h_new, h_old, X, w, data, hyparam, param, likfun, verbose);
 
         h0 = hyparam_rnd(hyparam, param);
-    
         [h_new,nQ] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
 
         Q = -nQ;
-        logmargpost_new = loghypost(h_new, data, hyparam, param, likfun, nsamples_x);
+        logmargpost_new = loghypost(h_new, data, hyparam, param, likfun, lme_samples);
 
         % print stuff
         if verbose
@@ -119,10 +122,15 @@ function results = hfit_optimize(likfun,hyparam,param,data,verbose)
             disp(['    ln P(h_old|D) ~= ', num2str(logmargpost_old), ' (new one should be better)']);
         end
 
+        if iter > 1 && abs(logmargpost_new - logmargpost_old) < tol
+            break;
+        end
+
         h_old = h_new;
         logmargpost_old = logmargpost_new;
     end
 
+    h = h_new;
     param = set_logpdf(hyparam, param, h_new);
 end
 
@@ -131,7 +139,7 @@ end
 % compute importance weights w for a given set of parameter samples
 %
 function [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq)
-    % compute ln P(x|data,h_old) for samples (unnormalized)
+    % compute ln P(x|D,h_old) for samples (unnormalized)
     logp = logpost(X, data, h_old, hyparam, param, likfun);
 
     % compute importance weights
@@ -141,15 +149,14 @@ function [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq)
 
     % compute effective sample size
     eff = 1 / exp(logsumexp(logw * 2));
-    disp(['effective sample size = ', num2str(eff), ' (vs. ', num2str(length(w)), ')']);
 end
 
 
-% Draw random samples of paramters from P(x|data,h) using Gibbs sampling (Bishop 2006, p. 543).
+% Draw random samples of paramters from P(x|D,h) using Gibbs sampling (Bishop 2006, p. 543).
 %
 % OUTPUTS:
 %   X = [nsamples x K] samples; each row is a set of parameters x
-%   logq = [nsamples x 1] = ln q(x) = ln P(x|data,h) for each x (unnormalized); used to compute importance weights
+%   logq = [nsamples x 1] = ln q(x) = ln P(x|D,h) for each x (unnormalized); used to compute importance weights
 
 %
 function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch_size, burn_in, verbose)
@@ -166,6 +173,8 @@ function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch
     % log of std of proposal distribution for each component
     ls = zeros(1,K);
 
+    disp('  Drawing new samples from P(x|D,h)...');
+
     % Draw nsamples samples
     for n = 1:nsamples+burn_in 
         x_new = nan(1,K);
@@ -175,7 +184,7 @@ function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch
         % Adaptive Metropolis-within-Gibbs for each component
         % (Roberts and Rosenthal, 2008)
         for k = 1:K
-            % P(x_k|x_\k,data,h) is proportional to P(data|x) P(x_k|h)
+            % P(x_k|x_\k,D,h) is proportional to P(D|x) P(x_k|h)
             logpost_k = @(x_k) loglik([x_new(1:k-1) x_k x_old(k+1:end)], data, likfun) + param(k).logpdf(x_k);
 
             % proposals update by adding an increment ~ N(0,exp(ls(k))
@@ -201,7 +210,7 @@ function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch
 
     X = X(burn_in+1:end,:);
 
-    % compute q(x) = P(x|data,h) up to a proportionality constant
+    % compute q(x) = P(x|D,h) up to a proportionality constant
     logq = logpost(X, data, h_old, hyparam, param, likfun);
 end
 
@@ -233,7 +242,7 @@ function logp = logprior(x, h, hyparam, param)
 end
 
 
-% ln P(data|x) = sum ln P(data(s)|x)
+% ln P(D|x) = sum ln P(D(s)|x)
 % notice this is a single parameter vector and the likelihood
 % is taken using data for all subjects
 %
@@ -246,10 +255,10 @@ function logp = loglik(x, data, likfun)
 end
 
 
-% ln P(x|data,h) for all samples (rows) x in X
+% ln P(x|D,h) for all samples (rows) x in X
 % up to a proportionality constant.
 %
-% P(x|data,h) = P(data|x) P(x|h) / P(data|h)
+% P(x|D,h) = P(D|x) P(x|h) / P(D|h)
 %
 function logp = logpost(X, data, h, hyparam, param, likfun)
     nsamples = size(X,1);
@@ -351,20 +360,20 @@ end
 
 
 
-% Q(h|h_old) = ln P(h) + integral P(x|data,h_old) ln P(data,x|h) dx
-%            = ln P(h) + integral P(x|data,h_old) [ln P(data|x) + ln P(x|h)] dx
-%           ~= ln P(h) + sum w(l) [ln P(data|x^l) + ln P(x^l|h)]
+% Q(h|h_old) = ln P(h) + integral P(x|D,h_old) ln P(D,x|h) dx
+%            = ln P(h) + integral P(x|D,h_old) [ln P(D|x) + ln P(x|h)] dx
+%           ~= ln P(h) + sum w(l) [ln P(D|x^l) + ln P(x^l|h)]
 % (Bishop 2006, p. 441 and p. 536)
 % Last line is an importance sampling approximation of the integral
 % using L samples x^1..x^L, with the importance weight of sample l given by
 % w(l) = P(x^l|data,h_old) / q(x^l) / sum(...)      (Bishop 2006, p. 533)
 %
-% TODO optimization: can ignore P(data|x) when maximizing Q w.r.t. h
+% TODO optimization: can ignore P(D|x) when maximizing Q w.r.t. h
 %
 function Q = computeQ(h_new, h_old, X, w, data, hyparam, param, likfun, verbose)
     nsamples = size(X,1);
 
-    % integral P(x|data,h_old) ln P(data,x|h) dx
+    % integral P(x|D,h_old) ln P(D,x|h) dx
     % approximated using importance sampling
     Q = 0;
     for n = 1:nsamples

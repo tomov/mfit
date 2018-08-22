@@ -69,7 +69,7 @@ param(2).ub = 1;
 
 % run optimization
 nstarts = 2;    % number of random parameter initializations
-param_new = hfit_optimize(@rllik,hyparam(1:2),param(1:2),data,true);
+[h, param] = hfit_optimize(@rllik,hyparam(1:2),param(1:2),data,false);
 
 % run optimization
 %nstarts = 2;    % number of random parameter initializations
