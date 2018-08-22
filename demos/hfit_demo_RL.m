@@ -25,37 +25,37 @@ end
 % ------------ fit models --------------------%
 
 % create parameter structure
-hparam(1).name = 'gamma distribution shape and scale parameters';
-hparam(1).lb = [0 0];
-hparam(1).ub = [110 11];
-%hparam(1).logpdf = @(x) log(unifpdf(x(1), 0, 11)) + log(unifpdf(x(2), 0, 11)); 
-J = @(a,b) [psi(1,a) 1/b; 1/b a/b^2]; % Fisher information for Gamma (Yang and Berger, 1999)
-hparam(1).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jeffreys prior for Gamma
-hparam(1).rnd = @() [rand * 110 rand * 11];
+hyparam(1).name = 'gamma distribution shape and scale parameters';
+hyparam(1).lb = [0 0];
+hyparam(1).ub = [130 13];
+hyparam(1).logpdf = @(x) log(unifpdf(x(1), 0, 130)) + log(unifpdf(x(2), 0, 13)); 
+J = @(a,b) [psi(1,a) 1/b; 1/b a/b^2]; % Fisher information for Gamma (Yang and Berger, 1139)
+%hyparam(1).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jeffreys prior for Gamma
+hyparam(1).rnd = @() [rand * 130 rand * 13];
 
 param(1).name = 'inverse temperature';
 param(1).hlogpdf = @(x,h) sum(log(gampdf(x,h(1),h(2))));
 param(1).hrnd = @(h) gamrnd(h(1),h(2));
 param(1).lb = 0;    % lower bound
-param(1).ub = 50;   % upper bound
+param(1).ub = 100;   % upper bound
 
 
 [a,b] = meshgrid(0:10:1000);
 z = a;
 for i = 1:size(a,1)
     for j = 1:size(a,2)
-        z(i,j) = hparam(1).logpdf([a(i,j),b(i,j)]);
+        z(i,j) = hyparam(1).logpdf([a(i,j),b(i,j)]);
     end
 end
 
 
-hparam(2).name = 'beta distribution parameters alpha and beta';
-hparam(2).lb = [0 0];
-hparam(2).ub = [10 100];
-%hparam(2).logpdf = @(x) log(unifpdf(x(1), 0, 10)) + log(unifpdf(x(2), 0, 10)); 
+hyparam(2).name = 'beta distribution parameters alpha and beta';
+hyparam(2).lb = [0 0];
+hyparam(2).ub = [13 13];
+hyparam(2).logpdf = @(x) log(unifpdf(x(1), 0, 13)) + log(unifpdf(x(2), 0, 13)); 
 J = @(a,b) [psi(1,a)-psi(1,a+b) -psi(1,a+b); -psi(1,a+b) psi(1,b)-psi(1,a+b)]; % Fisher information for Beta
-hparam(2).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jefferys prior for Beta
-hparam(2).rnd = @() [rand * 10 rand * 100];
+%hyparam(2).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jefferys prior for Beta
+hyparam(2).rnd = @() [rand * 13 rand * 13];
 
 param(2).name = 'learning rate';
 param(2).hlogpdf = @(x,h) sum(log(betapdf(x,h(1),h(2))));
@@ -63,13 +63,13 @@ param(2).hrnd = @(h) betarnd(h(1),h(2));
 param(2).lb = 0;
 param(2).ub = 1;
 
-param(3) = param(2); % second learning rate for model 2
-hparam(3) = hparam(2);
+%param(3) = param(2); % second learning rate for model 2
+%hyparam(3) = hyparam(2);
 
 
 % run optimization
 nstarts = 2;    % number of random parameter initializations
-param_new = hfit_optimize(@rllik,hparam(1:2),param(1:2),data);
+param_new = hfit_optimize(@rllik,hyparam(1:2),param(1:2),data);
 
 % run optimization
 %nstarts = 2;    % number of random parameter initializations

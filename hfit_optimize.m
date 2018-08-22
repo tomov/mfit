@@ -1,8 +1,8 @@
-function results = hfit_optimize(likfun,hparam,param,data)
+function results = hfit_optimize(likfun,hyparam,param,data)
 
     % Estimate hyperparameters (parameters for a group-level prior) by inverting
     % the generative model:
-    %   group-level hyperparameters h ~ P(h), defined by hparam.logpdf
+    %   group-level hyperparameters h ~ P(h), defined by hyparam.logpdf
     %   individual parameters       x ~ P(x|h), defined by param.hlogpdf
     %   data                     data ~ P(data|x), defined by likfun 
     %
@@ -11,12 +11,12 @@ function results = hfit_optimize(likfun,hparam,param,data)
     % sampling, with x's resampled every few iterations using Gibbs sampling, 
     % using Metropolis-Hastings to sample each component.
     %
-    % USAGE: param = hfit_optimize(likfun,hparam,param,data)
+    % USAGE: param = hfit_optimize(likfun,hyparam,param,data)
     %        results = mfit_optimize(likfun,param,data,[nstarts])
     %
     % INPUTS:
     %   likfun - likelihood function handle
-    %   hparam - [K x 1] hyperparameter structure
+    %   hyparam - [K x 1] hyperparameter structure
     %   param - [K x 1] parameter structure, with hlogpdf and hrnd fields
     %   data - [S x 1] data structure
     %
@@ -33,19 +33,29 @@ function results = hfit_optimize(likfun,hparam,param,data)
     nsamples = 10;
     iter = 0;
     K = length(param);
-    assert(length(hparam) == K, 'param and hparam must have the same length');
+    assert(length(hyparam) == K, 'param and hyparam must have the same length');
     S = length(data);
-%    m = randn(1,K);
-%    v = ones(1,K)*100;
 
-    h_old = [];
-    for k = 1:K
-        h_old = [h_old hparam(k).rnd()];
+    % pick a crude estimate of h_old 
+    % compute a bunch of random h's and pick one with max P(h|D)
+    logmargpost_old = -Inf;
+    for i = 1:10000
+        disp(i);
+        h = hyparam_rnd(hyparam, param);
+        logp = loghypost(h, data, hyparam, param, likfun);
+        if logp > logmargpost_old
+            h_old = logp;
+            logmargpost_old = logp;
+        end
     end
+
+    disp('h_old initialized as:');
+    disp(h_old);
+    disp(['ln P(h|D) ~= ', num2str(logmargpost_old)]);
     
     % extract lower and upper bounds
-    lb = [hparam.lb];
-    ub = [hparam.ub];
+    lb = [hyparam.lb];
+    ub = [hyparam.ub];
     
     options = optimset('Display','off');
     warning off all
@@ -55,52 +65,78 @@ function results = hfit_optimize(likfun,hparam,param,data)
         
         iter = iter + 1;
         disp(['.. iteration ',num2str(iter)]);
+
+        %
+        % E step: use importance sampling to approximate 
+        % the integral over P(x|data,h_old)
+        %
   
         % Draw samples from P(x|data,h_old)
         % TODO only do every so often
-        [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples);
+        [X, logq] = sample_post(h_old, likfun, hyparam, param, data, nsamples);
 
         % compute ln P(x|data,h_old) for samples (unnormalized)
-        logp = logpost(X, data, h_old, hparam, param, likfun);
+        logp = logpost(X, data, h_old, hyparam, param, likfun);
 
         % compute importance weights
         % w(i) = p(i)/q(i) / sum(p(j)/q(j))   (Bishop 2006, p. 533)
         logw = logp - logq - logsumexp(logp - logq);
         w = exp(logw);
 
-        disp(X);
-        disp(w);
+        %
+        % M step: maximize Q(h,h_old)
+        %
 
-        f = @(h_new) -computeQ(h_new, h_old, X, w, data, hparam, param, likfun);
+        f = @(h_new) -computeQ(h_new, h_old, X, w, data, hyparam, param, likfun);
 
-        h0 = [];
-        for k = 1:K
-            h0 = [h0 hparam(k).rnd()];
-        end
+        h0 = hyparam_rnd(hyparam, param);
     
         [h_new,nQ] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
-        Q = -nQ;
-            
-        h_old = h_new;
 
-        disp('NEW h!');
+        Q = -nQ;
+        logmargpost_new = loghypost(h_new, data, hyparam, param, likfun);
+ 
+           
+        disp('X and w:');
+        disp(X);
+        disp(w);
+        disp('------ h_new =');
         disp(h_new);
-        disp(loghypost(h_new, data, hparam, param, likfun));
+        disp(['ln P(h_new|D) ~= ', num2str(logmargpost_new)]);
+        disp('   ...vs...');
+        disp(h_old);
+        disp(['ln P(h_old|D) ~= ', num2str(logmargpost_old)]);
+
+        h_old = h_new;
+        logmargpost_old = logmargpost_new;
     end
 
-    param = set_logpdf(hparam, param, h_new);
+    param = set_logpdf(hyparam, param, h_new);
+end
+
+
+% Draw from P(x|h)
+% does NOT respect parameter bounds
+%
+function [X] = sample_prior(h, hyparam, param, nsamples)
+    X = nan(nsamples, length(param));
+    for n = 1:nsamples
+        x = param_rnd(hyparam, param, h, false);
+        X(n,:) = x;
+    end
 end
 
 
 
-% Draw random samples of paramters from P(x|data,h) using Gibbs sampling (Bishop 2006, p. 543).
+% Draw from P(x|data,h) using Gibbs sampling (Bishop 2006, p. 543).
+% Respects parameter bounds.
 %
 % OUTPUTS:
 %   X = [nsamples x K] samples; each row is a set of parameters x
 %   logq = [nsamples x 1] = ln q(x) = ln P(x|data,h) for each x (unnormalized); used to compute importance weights
 
 %
-function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
+function [X, logq] = sample_post(h_old, likfun, hyparam, param, data, nsamples)
     K = length(param);
     X = nan(nsamples, K);
     logq = nan(nsamples, 1);
@@ -108,10 +144,10 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
     burn_in = 10; % burn in first few samples
 
     % initialize x0
-    x_old = param_rnd(hparam, param, h_old);
+    x_old = param_rnd(hyparam, param, h_old, true);
 
     % set .logpdf = P(x|h) for convenience
-    param = set_logpdf(hparam, param, h_old);
+    param = set_logpdf(hyparam, param, h_old);
 
     % log of std of proposal distribution for each component
     ls = zeros(1,K);
@@ -152,7 +188,7 @@ function [X, logq] = sample(h_old, likfun, hparam, param, data, nsamples)
     X = X(burn_in+1:end,:);
 
     % compute q(x) = P(x|data,h) up to a proportionality constant
-    logq = logpost(X, data, h_old, hparam, param, likfun);
+    logq = logpost(X, data, h_old, hyparam, param, likfun);
 end
 
 
@@ -173,16 +209,15 @@ end
 
 % ln P(x|h)
 %
-function logp = logprior(x, h, hparam, param)
+function logp = logprior(x, h, hyparam, param)
     logp = 0;
     i = 1;
     for k = 1:length(param)
-        l = length(hparam(k).lb);
+        l = length(hyparam(k).lb);
         logp = logp + param(k).hlogpdf(x(k),h(i:i+l-1));
         i = i + l;
     end
-    h
-    disp(['  logprior ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
+    %disp(['  logprior ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
@@ -196,7 +231,7 @@ function logp = loglik(x, data, likfun)
     for s = 1:length(data)
         logp = logp + likfun(x,data(s));
     end
-    disp(['  loglik ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
+    %disp(['  loglik ', num2str(x(1)), ',', num2str(x(2)), ' = ', num2str(logp)]);
 end
 
 
@@ -205,27 +240,14 @@ end
 %
 % P(x|data,h) = P(data|x) P(x|h) / P(data|h)
 %
-function logp = logpost(X, data, h, hparam, param, likfun)
+function logp = logpost(X, data, h, hyparam, param, likfun)
     nsamples = size(X,1);
     for n = 1:nsamples
         x = X(n,:);
-        logp(n) = loglik(x, data, likfun) + logprior(x, h, hparam, param);
+        logp(n) = loglik(x, data, likfun) + logprior(x, h, hyparam, param);
     end
 end
 
-
-% ln P(h)
-%
-function logp = loghyprior(h, hparam)
-    logp = 0;
-    i = 1;
-    for k = 1:length(hparam)
-        l = length(hparam(k).lb);
-        logp = logp + hparam(k).logpdf(h(i:i+l-1));
-        i = i + l;
-    end
-end
- 
 
 % ln P(D|h) approximation
 %
@@ -233,45 +255,37 @@ end
 %       ~= 1/L sum P(D|x^l) P(x^l|h)
 % where the L samples x^1..x^l are drawn from P(x|h)
 %
-function logp = loghylik(h, data, hparam, param, likfun)
-    nsamples = 10;
+function logp = loghylik(h, data, hyparam, param, likfun)
+    nsamples = 10000;
+    tic
+    %draw = memoize(@sample_prior); % reuse the sample sample
+    X = sample_prior(h, hyparam, param, nsamples);
+    toc
+
     logp = [];
-    disp('----------------sheeeeeeeeeeeeeeeeit');
     for n = 1:nsamples
-        x = param_rnd(hparam, param, h);
-        x
-        logp = [logp; loglik(x, data, likfun) + logprior(x, h, hparam, param)];
+        x = X(n,:);
+        logp = [logp; loglik(x, data, likfun) + logprior(x, h, hyparam, param)];
     end
+    logp
     logp = logsumexp(logp) - log(nsamples);
 end
 
 
 % ln P(h|D) up to a proportionality constant
 %
-function logp = loghypost(h, data, hparam, param, likfun)
-    logp = loghylik(h, data, hparam, param, likfun) + loghyprior(h, hparam);
-end
-
-
-% random draw from P(x|h)
-%
-function x = param_rnd(hparam, param, h)
-    i = 1;
-    for k = 1:length(param)
-        l = length(hparam(k).lb);
-        x(k) = param(k).hrnd(h(i:i+l-1));
-        i = i + l;
-    end
+function logp = loghypost(h, data, hyparam, param, likfun)
+    logp = loghylik(h, data, hyparam, param, likfun) + loghyprior(h, hyparam);
 end
 
 
 
 % set .logpdf i.e. P(x|h) for each param based on given hyperparameters h
 %
-function param = set_logpdf(hparam, param, h)
+function param = set_logpdf(hyparam, param, h)
     i = 1;
     for k = 1:length(param)
-        l = length(hparam(k).lb);
+        l = length(hyparam(k).lb);
         param(k).logpdf = @(x) param(k).hlogpdf(x,h(i:i+l-1));
         i = i + l;
     end
@@ -288,7 +302,7 @@ end
 %
 % TODO optimization: can ignore P(data|x) when maximizing Q w.r.t. h
 %
-function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
+function Q = computeQ(h_new, h_old, X, w, data, hyparam, param, likfun)
     nsamples = size(X,1);
 
     % integral P(x|data,h_old) ln P(data,x|h) dx
@@ -296,15 +310,15 @@ function Q = computeQ(h_new, h_old, X, w, data, hparam, param, likfun)
     Q = 0;
     for n = 1:nsamples
         x = X(n,:);
-        Q = Q + w(n) * (loglik(x, data, likfun) + logprior(x, h_new, hparam, param));
+        Q = Q + w(n) * (loglik(x, data, likfun) + logprior(x, h_new, hyparam, param));
     end 
 
     % ln P(h)
-    Q = Q + loghyprior(h_new, hparam); 
+    Q = Q + loghyprior(h_new, hyparam); 
 
     disp('computeQ');
     disp(h_new);
-    disp(loghyprior(h_new, hparam));
+    disp(loghyprior(h_new, hyparam));
     disp(Q);
 
 end
