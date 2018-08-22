@@ -1,5 +1,6 @@
-function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
+function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
 
+    % Find MAP hyperparameters and MAP parameters conditioned on them.
     % Estimate hyperparameters (parameters for a group-level prior) by inverting
     % the generative model:
     %   group-level hyperparameters h ~ P(h), defined by hyparam.logpdf
@@ -8,11 +9,11 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     %
     % Uses expectation maximization (EM) to find MAP P(h|D), with x serving as latent
     % variables (Bishop 2006). We approximate the integral over x using importance
-    % sampling, with x's resampled every few iterations using Gibbs sampling, 
-    % using Metropolis-Hastings to sample each component.
+    % sampling, with x's resampled every few iterations using Metropolis-within-Gibbs
+    % sampling, 
+    % Then finds MAP P(x|h,D) using mfit_optimize.
     %
-    % USAGE: param = hfit_optimize(likfun,hyparam,param,data)
-    %        results = mfit_optimize(likfun,param,data,[nstarts])
+    % USAGE: [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     %
     % INPUTS:
     %   likfun - likelihood function handle
@@ -22,23 +23,47 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     %   verbose (optional) - whether to print stuff
     %
     % OUTPUTS:
+    %   results - results of mfit_optimize
+    %   h - MAP hyperparameters h
     %   param - the param structure array with .logpdf defined based on
     %           the MAP hyperparameters h. Can be passed in turn to mfit_optimize.
     %
-    % Sam Gershman, July 2017
+    % Momchil Tomov, Aug 2018
 
     if nargin < 5
         verbose = false;
     end
-    
+ 
+    disp('\n\n ------------- fitting hyperparameters -----------\n\n');
+    [h, param] = EM(likfun, hyparam, param, data, verbose);
+
+    disp('\n\n ------------- fitting parameters -----------\n\n');
+    results = mfit_optimize(likfun, param, data);
+
+    % correct for hyperparameters
+    hyK = 0;
+    for k = 1:length(hyparam)
+        hyK = hyK + length(hyparam(k).lb);
+    end
+    for s = 1:length(data)
+        results.bic(s,1) = results.bic(s,1) + hyK * log(data(s).N);
+        results.aic(s,1) = results.aic(s,1) + hyK * 2;
+    end
+end
+
+
+% Expectation maximization to find MAP P(h|D)
+%
+function [h, param] = EM(likfun, hyparam, param, data, verbose);
     % initialization
     tol = 1e-3; % tolerance: stop when improvements in Q are less than that
     maxiter = 20; % stop after that many iterations
-    nsamples_x = 10; % how many samples of x to use to approximate EM integral
-    init_samples_h = 100; % how many samples of h to use to initialize h_old
-    lme_samples = 1000; % how many samples to use to approximate P(D|h) (for termination condition)
+    nsamples = 100; % how many samples of x to use to approximate EM integral
+    init_samples = 100; % how many samples of h to use to initialize h_old
+    lme_samples = 100; % how many samples to use to approximate P(D|h) (for termination condition)
     batch_size = 50; % subsample once every batch_size samples (gibbs sampler param)
-    burn_in = 10; % burn in first few samples when gibbs sampling
+    burn_in = 100; % burn in first few samples when gibbs sampling
+    eff_min = 0.25; % minimum effective sample size (ratio) to trigger resampling
 
     K = length(param);
     assert(length(hyparam) == K, 'param and hyparam must have the same length');
@@ -47,26 +72,13 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     % pick a crude estimate of h_old 
     % compute a bunch of random h's and pick one with max P(h|D)
     disp('Initializing h_old with a crude estimate ...');
-    logmargpost_old = -Inf;
-    for i = 1:init_samples_h
-        if verbose, disp(['  init iter ', num2str(i)]); end
-        h = hyparam_rnd(hyparam, param);
-        logp = loghypost(h, data, hyparam, param, likfun, lme_samples);
-        if logp > logmargpost_old
-            h_old = h;
-            logmargpost_old = logp;
-            if verbose
-                disp(['    new h_old = ', mat2str(h_old)]);
-                disp(['    ln P(h|D) = ', num2str(logmargpost_old)]);
-            end
-        end
-    end
+    [h_old, logmargpost_old] = random_MAP(likfun, hyparam, param, data, init_samples, lme_samples, verbose);
 
     disp(['h_old initialized as ', mat2str(h_old)]);
     disp(['ln P(h|D) ~= ', num2str(logmargpost_old)]);
-   
+
     % Draw samples from q(x) = P(x|D,h_old)
-    [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
+    [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch_size, burn_in, verbose);
 
     % extract lower and upper bounds
     lb = [hyparam.lb];
@@ -89,25 +101,32 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
 
         % importance weights and effective sample size
         [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq);
-        disp(['effective sample size = ', num2str(eff), ' (vs. ', num2str(length(w)), ')']);
+        disp(['  E step: effective sample size = ', num2str(eff), ' (out of ', num2str(length(w)), ')']);
 
         % draw new samples from q(x) = P(x|D,h_old) if effective sample size is too small
-        if eff < length(w) * 0.25
-            [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples_x, batch_size, burn_in, verbose);
+        if eff < length(w) * eff_min
+            [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch_size, burn_in, verbose);
             [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq);
+            disp(['           new effective sample size = ', num2str(eff), ' (out of ', num2str(length(w)), ')']);
         end
 
         %
         % M step: maximize Q(h,h_old)
         %
 
+        disp('  M step: maximizing Q...');
         f = @(h_new) -computeQ(h_new, h_old, X, w, data, hyparam, param, likfun, verbose);
 
+        disp(['Current Q = ', num2str(-f(h_old))]);
+
         h0 = hyparam_rnd(hyparam, param);
+        %h0 = h_old;
         [h_new,nQ] = fmincon(f,h0,[],[],[],[],lb,ub,[],options);
 
         Q = -nQ;
         logmargpost_new = loghypost(h_new, data, hyparam, param, likfun, lme_samples);
+
+        disp(['new Q = ', num2str(Q)]);
 
         % print stuff
         if verbose
@@ -122,7 +141,8 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
             disp(['    ln P(h_old|D) ~= ', num2str(logmargpost_old), ' (new one should be better)']);
         end
 
-        if iter > 1 && abs(logmargpost_new - logmargpost_old) < tol
+        if iter > 1 && logmargpost_new - logmargpost_old < tol
+            % also stops when P(h|D) went up (might happen b/c of approximation)
             break;
         end
 
@@ -134,6 +154,26 @@ function [h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     param = set_logpdf(hyparam, param, h_new);
 end
 
+
+% find h = argmax P(h|D) for random samples of h
+%
+function [h_best, logp_best] = random_MAP(likfun, hyparam, param, data, init_samples, lme_samples, verbose);
+    logp_best = -Inf;
+    h_best = [];
+    for i = 1:init_samples
+        if verbose, disp(['  init iter ', num2str(i)]); end
+        h = hyparam_rnd(hyparam, param);
+        logp = loghypost(h, data, hyparam, param, likfun, lme_samples);
+        if logp > logp_best
+            h_best = h;
+            logp_best = logp;
+            if verbose
+                disp(['    new h_best = ', mat2str(h_best)]);
+                disp(['    ln P(h|D) = ', num2str(logp_best)]);
+            end
+        end
+    end
+end
 
 
 % compute importance weights w for a given set of parameter samples
@@ -173,7 +213,7 @@ function [X, logq] = sample(h_old, likfun, hyparam, param, data, nsamples, batch
     % log of std of proposal distribution for each component
     ls = zeros(1,K);
 
-    disp('  Drawing new samples from P(x|D,h)...');
+    disp('    Drawing new samples from P(x|D,h)...');
 
     % Draw nsamples samples
     for n = 1:nsamples+burn_in 
@@ -282,23 +322,28 @@ function logp = loghyprior(h, hyparam)
 end
  
 
-% ln P(D|h) approximation
+% ln P(D|h) approximation (log model evidence)
 %
 % P(D|h) = integral P(D|x) P(x|h) dx
-%       ~= 1/L sum P(D|x^l) P(x^l|h)
+%       ~= 1/L sum P(D|x^l)
 % where the L samples x^1..x^l are drawn from P(x|h)
 %
 function logp = loghylik(h, data, hyparam, param, likfun, nsamples)
     logp = [];
     for n = 1:nsamples
-        x = param_rnd(hyparam, param, h, false);
-        logpost = loglik(x, data, likfun) + logprior(x, h, hyparam, param);
-        if ~isnan(logpost) && ~isinf(logpost)
-            logp = [logp; logpost];
+        x = param_rnd(hyparam, param, h, true, 1);
+        lik = loglik(x, data, likfun);
+        if ~isnan(lik) && ~isinf(lik)
+            logp = [logp; lik];
         end
     end
-    assert(~isempty(logp), ['Looks like no good parameters x were found for the given h= ', mat2str(h)]);
-    logp = logsumexp(logp) - log(nsamples);
+    %disp(['LME computation P(D|h) using ', num2str(length(logp)), ' samples']);
+    if isempty(logp)
+        disp(['No good parameters x were found for the given h= ', mat2str(h)]);
+        logp = -Inf;
+    else
+        logp = logsumexp(logp) - log(length(logp));
+    end
 end
 
 
@@ -343,15 +388,21 @@ end
 
 % random draw from P(x|h)
 %
-function x = param_rnd(hyparam, param, h, respect_bounds)
+function x = param_rnd(hyparam, param, h, respect_bounds, max_attempts)
+    if nargin < 5
+        max_attempts = 1000;
+    end
     i = 1;
     for k = 1:length(param)
         l = length(hyparam(k).lb);
-        while true
+        for attempts = 1:max_attempts
             x(k) = param(k).hrnd(h(i:i+l-1));
             if ~respect_bounds || (param(k).lb <= x(k) && x(k) <= param(k).ub)
                 % keep parameters within bounds
                 break;
+            elseif attempts == max_attempts
+                %disp(['  Could not find good setting for param ', num2str(k), ' after ', num2str(attempts), ' attempts with h = ', mat2str(h)]);
+                x(k) = NaN;
             end
         end
         i = i + l;
