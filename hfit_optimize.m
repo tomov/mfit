@@ -1,6 +1,7 @@
-function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
+function results = hfit_optimize(likfun,hyparam,param,data,verbose)
 
     % Find MAP hyperparameters and MAP parameters conditioned on them.
+    %
     % Generative model:
     %   group-level hyperparameters h ~ P(h), defined by hyparam.logpdf
     %   individual parameters       x ~ P(x|h), defined by param.hlogpdf
@@ -11,7 +12,7 @@ function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     % sampling, with x's resampled every few iterations using Metropolis-within-Gibbs
     % sampling. Then finds MAP P(x|h,D) using mfit_optimize.
     %
-    % USAGE: [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
+    % USAGE: results = hfit_optimize(likfun,hyparam,param,data,verbose)
     %
     % INPUTS:
     %   likfun - likelihood function handle
@@ -21,10 +22,9 @@ function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
     %   verbose (optional) - whether to print stuff
     %
     % OUTPUTS:
-    %   results - results of mfit_optimize
-    %   h - MAP hyperparameters h
-    %   param - the param structure array with .logpdf defined based on
-    %           the MAP hyperparameters h. Can be passed in turn to mfit_optimize.
+    %   results - results of mfit_optimize, plus:
+    %           .h - MAP hyperparameters h
+    %           .param - the param structure array with .logpdf defined based on h
     %
     % Momchil Tomov, Aug 2018
 
@@ -34,14 +34,18 @@ function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
 
     % fit hyperparameters h
     disp('\n\n ------------- fitting hyperparameters -----------\n\n');
+    tic
     h = EM(likfun, hyparam, param, data, verbose);
+    toc
 
-    % set param.logpdf according to h
-    param = set_logpdf(hyparam, param, h_new); % 
+    % set .logpdf according to h
+    param = set_logpdf(hyparam, param, h); 
 
     % fit parameters x given h
     disp('\n\n ------------- fitting parameters -----------\n\n');
+    tic
     results = mfit_optimize(likfun, param, data);
+    toc
 
     % correct for hyperparameters
     hyK = 0;
@@ -52,6 +56,9 @@ function [results, h, param] = hfit_optimize(likfun,hyparam,param,data,verbose)
         results.bic(s,1) = results.bic(s,1) + hyK * log(data(s).N);
         results.aic(s,1) = results.aic(s,1) + hyK * 2;
     end
+
+    results.h = h;
+    results.param = param; % with .logpdf set
 end
 
 
@@ -59,7 +66,7 @@ end
 %
 function h = EM(likfun, hyparam, param, data, verbose);
     % initialization
-    tol = 1e-3; % tolerance: stop when improvements in Q are less than that
+    tol = 1e-2; % tolerance: stop when improvements in Q are less than that
     maxiter = 20; % stop after that many iterations
     nsamples = 100; % how many samples of x to use to approximate EM integral
     init_samples = 100; % how many samples of h to use to initialize h_old
@@ -184,7 +191,7 @@ function [w, eff] = weights(X, data, h_old, hyparam, param, likfun, logq)
     logw = logp - logq - logsumexp(logp - logq);
     w = exp(logw);
 
-    % compute effective sample size
+    % compute effective sample size (Gelman 2013 BDA, p. 266)
     eff = 1 / exp(logsumexp(logw * 2));
 end
 

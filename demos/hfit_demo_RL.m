@@ -30,7 +30,7 @@ hyparam(1).name = 'gamma distribution shape and scale parameters';
 hyparam(1).lb = [0 0];
 hyparam(1).ub = [130 13];
 hyparam(1).logpdf = @(x) log(unifpdf(x(1), 0, 130)) + log(unifpdf(x(2), 0, 13)); 
-J = @(a,b) [psi(1,a) 1/b; 1/b a/b^2]; % Fisher information for Gamma (Yang and Berger, 1139)
+J = @(a,b) [psi(1,a) 1/b; 1/b a/b^2]; % Fisher information for Gamma (Yang and Berger, 1998)
 %hyparam(1).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jeffreys prior for Gamma
 hyparam(1).rnd = @() [rand * 130 rand * 13];
 
@@ -54,8 +54,8 @@ hyparam(2).name = 'beta distribution parameters alpha and beta';
 hyparam(2).lb = [1 1];
 hyparam(2).ub = [13 13];
 hyparam(2).logpdf = @(x) log(unifpdf(x(1), 0, 13)) + log(unifpdf(x(2), 0, 13)); 
-J = @(a,b) [psi(1,a)-psi(1,a+b) -psi(1,a+b); -psi(1,a+b) psi(1,b)-psi(1,a+b)]; % Fisher information for Beta
-%hyparam(2).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jefferys prior for Beta
+J = @(a,b) [psi(1,a)-psi(1,a+b) -psi(1,a+b); -psi(1,a+b) psi(1,b)-psi(1,a+b)]; % Fisher information for Beta (Yang and Berger, 1998)
+%hyparam(2).logpdf = @(h) log(sqrt(det(J(h(1),h(2))))); % Jeffreys prior for Beta
 hyparam(2).rnd = @() [rand * 13 rand * 13];
 
 param(2).name = 'learning rate';
@@ -72,10 +72,10 @@ hyparam(3) = hyparam(2);
 nstarts = 2;    % number of random parameter initializations
 
 disp('... Fitting model 1');
-[results(1), h(1)] = hfit_optimize(@rllik,hyparam,param,data);
+results(1) = hfit_optimize(@rllik,hyparam(1:2),param(1:2),data);
 
 disp('... Fitting model 2');
-[results(2), h(2)] = hfit_optimize(@rllik2,hyparam,param,data);
+results(2) = hfit_optimize(@rllik2,hyparam,param,data);
 
 % compute predictive probability for the two models on test data
 logp(:,1) = mfit_predict(testdata,results(1));
